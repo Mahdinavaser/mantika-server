@@ -5,71 +5,82 @@ const cors = require('cors');
 
 // 1. Setup the Server
 const app = express();
-app.use(cors()); // Allow connections from the Android app
+app.use(cors());
 
 const server = http.createServer(app);
 
 // 2. Setup Socket.io for Real-Time Chat
 const io = new Server(server, {
     cors: {
-        origin: "*", // Accepts connection from any device/app
+        origin: "*",
         methods: ["GET", "POST"]
     }
 });
 
 // 3. Temporary Database (Memory)
-// We will store messages here so when a new student joins, they see old messages.
-// (Later we can connect this to MongoDB for permanent storage)
 let chatHistory = [];
 let pinnedMessage = null;
 
+// 🟢 NEW: لیست کاربران آنلاین
+// فرمت: { socketId: '...', name: 'علی', role: 'student' }
+let onlineUsers = []; 
+
 // 4. Listen for User Connections
 io.on('connection', (socket) => {
-    console.log('یک کاربر جدید متصل شد:', socket.id);
+    console.log('User connected:', socket.id);
 
-    // وقتی کاربر وصل شد، تاریخچه پیام‌ها و پیام سنجاق شده را برایش بفرست
+    // ارسال دیتای اولیه
     socket.emit('load_history', chatHistory);
-    if (pinnedMessage) {
-        socket.emit('load_pin', pinnedMessage);
-    }
+    if (pinnedMessage) socket.emit('load_pin', pinnedMessage);
 
-    // گرفتن پیام جدید از کاربر و ارسال به همه
-    socket.on('send_message', (msgData) => {
-        /* msgData looks like: { id: 'msg-1', text: 'سلام', senderName: 'آرش', role: 'student' } */
-        chatHistory.push(msgData);
+    // 🟢 NEW: وقتی یک کاربر مشخصاتش را می‌فرستد (لاگین می‌کند)
+    socket.on('user_joined', (userData) => {
+        // اضافه کردن به لیست کاربران آنلاین
+        const newUser = {
+            id: socket.id,
+            name: userData.name,
+            role: userData.role
+        };
+        onlineUsers.push(newUser);
         
-        // io.emit means "send to EVERYONE including the sender"
+        // فرستادن لیست آپدیت شده برای همه
+        io.emit('online_users_updated', onlineUsers);
+    });
+
+    socket.on('send_message', (msgData) => {
+        chatHistory.push(msgData);
+        // نگه داشتن نهایتا 100 پیام آخر در حافظه موقت سرور برای جلوگیری از پر شدن رم
+        if (chatHistory.length > 100) chatHistory.shift(); 
+        
         io.emit('receive_message', msgData); 
     });
 
-    // گرفتن دستور حذف پیام از سمت استاد
     socket.on('delete_messages', (msgIdsArray) => {
-        // حذف پیام‌ها از حافظه سرور
         chatHistory = chatHistory.filter(msg => !msgIdsArray.includes(msg.id));
-        // اعلام به همه گوشی‌ها که این پیام‌ها را پاک کنند
         io.emit('messages_deleted', msgIdsArray);
     });
 
-    // گرفتن دستور سنجاق پیام از سمت استاد
     socket.on('pin_message', (msgText) => {
         pinnedMessage = msgText;
         io.emit('message_pinned', msgText);
     });
     
-    // برداشتن سنجاق پیام
     socket.on('unpin_message', () => {
         pinnedMessage = null;
         io.emit('message_unpinned');
     });
 
-    // قطع اتصال
+    // 🟢 NEW: وقتی اینترنت کاربر قطع می‌شود یا از چت بیرون می‌رود
     socket.on('disconnect', () => {
-        console.log('کاربر خارج شد:', socket.id);
+        console.log('User disconnected:', socket.id);
+        // حذف کاربر از لیست آنلاین‌ها
+        onlineUsers = onlineUsers.filter(user => user.id !== socket.id);
+        // ارسال لیست جدید به بقیه
+        io.emit('online_users_updated', onlineUsers);
     });
 });
 
 // 5. Start the Server
-// Liara will automatically provide the PORT environment variable
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 ManTika Server is running on port ${PORT}`);
